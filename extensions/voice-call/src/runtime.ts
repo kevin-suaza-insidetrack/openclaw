@@ -426,6 +426,7 @@ export async function createVoiceCallRuntime(params: {
                   question: parsedArgs.question,
                   consultResult: result.text,
                   backgroundEmailPrompt: effectiveConfig.realtime.backgroundEmailPrompt,
+                  recipientEmail: effectiveConfig.realtime.recipientEmail,
                 });
               })
               .catch((err: unknown) => {
@@ -473,6 +474,7 @@ export async function createVoiceCallRuntime(params: {
                   question: parsedArgs.question,
                   consultResult: r.text,
                   backgroundEmailPrompt: effectiveConfig.realtime.backgroundEmailPrompt,
+                  recipientEmail: effectiveConfig.realtime.recipientEmail,
                 });
               })
               .catch((err: unknown) => {
