@@ -2,12 +2,18 @@ import type { OpenClawConfig } from "openclaw/plugin-sdk/config-types";
 import { formatErrorMessage } from "openclaw/plugin-sdk/error-runtime";
 import {
   consultRealtimeVoiceAgent,
+  buildRealtimeVoiceAgentConsultEmailAckResponse,
+  parseRealtimeVoiceAgentConsultArgs,
   REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME,
   resolveRealtimeVoiceAgentConsultTools,
   resolveRealtimeVoiceAgentConsultToolsAllow,
   type RealtimeVoiceAgentConsultTranscriptEntry,
   type ResolvedRealtimeVoiceProvider,
 } from "openclaw/plugin-sdk/realtime-voice";
+import {
+  spawnEmailDeliveryAgent,
+  flushPendingBackgroundDeliveries,
+} from "./background-email-delivery.js";
 import type { VoiceCallConfig } from "./config.js";
 import {
   resolveVoiceCallEffectiveConfig,
@@ -361,23 +367,28 @@ export async function createVoiceCallRuntime(params: {
           if (fastContext.handled) {
             return fastContext.result;
           }
+
+          const parsedArgs = parseRealtimeVoiceAgentConsultArgs(args);
           const { provider: agentProvider, model } = resolveVoiceResponseModel({
             voiceConfig: effectiveConfig,
             agentRuntime,
           });
-          const thinkLevel = agentRuntime.resolveThinkingDefault({
-            cfg,
-            provider: agentProvider,
-            model,
-          });
-          return await consultRealtimeVoiceAgent({
+          const thinkLevel =
+            effectiveConfig.realtime.consultThinkingLevel ??
+            agentRuntime.resolveThinkingDefault({
+              cfg,
+              provider: agentProvider,
+              model,
+            });
+
+          const consultParams = {
             cfg,
             agentRuntime,
             logger: log,
             agentId,
             sessionKey,
-            messageProvider: "voice",
-            lane: "voice",
+            messageProvider: "voice" as const,
+            lane: "voice" as const,
             runIdPrefix: `voice-realtime-consult:${callId}`,
             args,
             transcript: mapVoiceCallConsultTranscript(call, handlerContext),
@@ -393,7 +404,69 @@ export async function createVoiceCallRuntime(params: {
               effectiveConfig.realtime.toolPolicy,
             ),
             extraSystemPrompt: REALTIME_VOICE_CONSULT_SYSTEM_PROMPT,
-          });
+          };
+
+          // --- Email-first path: user explicitly asked for email delivery ---
+          if (parsedArgs.deliveryPreference === "email") {
+            const consultPromise = consultRealtimeVoiceAgent(consultParams);
+            consultPromise
+              .then((result: { text: string }) => {
+                spawnEmailDeliveryAgent({
+                  cfg,
+                  agentRuntime,
+                  logger: log,
+                  agentId,
+                  sessionKey,
+                  question: parsedArgs.question,
+                  consultResult: result.text,
+                  backgroundEmailPrompt: effectiveConfig.realtime.backgroundEmailPrompt,
+                });
+              })
+              .catch((err: unknown) => {
+                log.error(
+                  `[voice-call] Background consult for email delivery failed: ${formatErrorMessage(err)}`,
+                );
+              });
+            return buildRealtimeVoiceAgentConsultEmailAckResponse("caller");
+          }
+
+          // --- Timeout path: race consult against backgroundConsultTimeoutMs ---
+          const bgTimeout = effectiveConfig.realtime.backgroundConsultTimeoutMs;
+          if (bgTimeout) {
+            const consultPromise = consultRealtimeVoiceAgent(consultParams);
+            const result = await Promise.race([
+              consultPromise.then((r: { text: string }) => ({ kind: "result" as const, value: r })),
+              new Promise<{ kind: "timeout" }>((resolve) =>
+                setTimeout(() => resolve({ kind: "timeout" }), bgTimeout),
+              ),
+            ]);
+            if (result.kind === "result") {
+              return result.value;
+            }
+            // Timeout exceeded — let the original promise continue and email the result
+            consultPromise
+              .then((r: { text: string }) => {
+                spawnEmailDeliveryAgent({
+                  cfg,
+                  agentRuntime,
+                  logger: log,
+                  agentId,
+                  sessionKey,
+                  question: parsedArgs.question,
+                  consultResult: r.text,
+                  backgroundEmailPrompt: effectiveConfig.realtime.backgroundEmailPrompt,
+                });
+              })
+              .catch((err: unknown) => {
+                log.error(
+                  `[voice-call] Background consult (timeout fallback) failed: ${formatErrorMessage(err)}`,
+                );
+              });
+            return buildRealtimeVoiceAgentConsultEmailAckResponse("caller");
+          }
+
+          // --- Normal path: await result and return it directly ---
+          return await consultRealtimeVoiceAgent(consultParams);
         },
       );
     }
@@ -483,7 +556,10 @@ export async function createVoiceCallRuntime(params: {
 
     await manager.initialize(provider, webhookUrl);
 
-    const stop = async () => await lifecycle.stop();
+    const stop = async () => {
+      await flushPendingBackgroundDeliveries();
+      await lifecycle.stop();
+    };
 
     log.info("[voice-call] Runtime initialized");
     log.info(`[voice-call] Webhook URL: ${webhookUrl}`);
