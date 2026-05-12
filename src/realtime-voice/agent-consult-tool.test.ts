@@ -27,7 +27,24 @@ describe("realtime voice agent consult tool", () => {
     );
   });
 
-  it("builds a reusable spoken consultant prompt with recent transcript", () => {
+  it("accepts provider question aliases from realtime tool calls", () => {
+    expect(parseRealtimeVoiceAgentConsultArgs({ prompt: "  Check the repo. " })).toStrictEqual({
+      context: undefined,
+      deliveryPreference: undefined,
+      question: "Check the repo.",
+      responseStyle: undefined,
+    });
+    expect(
+      parseRealtimeVoiceAgentConsultArgs({ query: "  Send a Discord message. " }),
+    ).toStrictEqual({
+      context: undefined,
+      deliveryPreference: undefined,
+      question: "Send a Discord message.",
+      responseStyle: undefined,
+    });
+  });
+
+  it("builds a delegated voice request prompt with recent transcript", () => {
     const prompt = buildRealtimeVoiceAgentConsultPrompt({
       args: { question: "Do we support realtime tools?" },
       transcript: [
