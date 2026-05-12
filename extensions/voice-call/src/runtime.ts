@@ -86,6 +86,9 @@ const BACKGROUND_CONSULT_SYSTEM_PROMPT = [
 /** Timeout for background consult runs (email-first and timeout-exceeded paths). */
 const BACKGROUND_CONSULT_TIMEOUT_MS = 3_600_000;
 
+/** Constrained tool allowlist for the email delivery agent (exec for CLI email tools + memory for email lookup). */
+const EMAIL_DELIVERY_TOOLS_ALLOW = ["exec", "memory_search", "memory_get"];
+
 let telnyxProviderPromise: Promise<TelnyxProviderModule> | undefined;
 let twilioProviderPromise: Promise<TwilioProviderModule> | undefined;
 let plivoProviderPromise: Promise<PlivoProviderModule> | undefined;
@@ -356,7 +359,7 @@ export async function createVoiceCallRuntime(params: {
         REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME,
         async (args, callId, handlerContext) => {
           log.info(
-            `[voice-call] Tool handler invoked: tool=${REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME}, call=${callId}, args=${JSON.stringify(args)}, partialTranscript=${JSON.stringify(handlerContext?.partialUserTranscript ?? null)}`,
+            `[voice-call] Tool handler invoked: tool=${REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME}, call=${callId}`,
           );
           const call = manager.getCall(callId);
           if (!call) {
@@ -435,7 +438,7 @@ export async function createVoiceCallRuntime(params: {
             consultPromise
               .then((result: { text: string }) => {
                 log.info(
-                  `[voice-call] Email-first path: background consult resolved for call=${callId}, result="${result.text.slice(0, 120)}"`,
+                  `[voice-call] Email-first path: background consult resolved for call=${callId}`,
                 );
                 spawnEmailDeliveryAgent({
                   cfg,
@@ -449,6 +452,7 @@ export async function createVoiceCallRuntime(params: {
                   recipientEmail: effectiveConfig.realtime.recipientEmail,
                   provider: agentProvider,
                   model,
+                  toolsAllow: EMAIL_DELIVERY_TOOLS_ALLOW,
                 });
               })
               .catch((err: unknown) => {
@@ -473,12 +477,14 @@ export async function createVoiceCallRuntime(params: {
               timeoutMs: BACKGROUND_CONSULT_TIMEOUT_MS,
               extraSystemPrompt: BACKGROUND_CONSULT_SYSTEM_PROMPT,
             });
+            let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
             const result = await Promise.race([
               consultPromise.then((r: { text: string }) => ({ kind: "result" as const, value: r })),
-              new Promise<{ kind: "timeout" }>((resolve) =>
-                setTimeout(() => resolve({ kind: "timeout" }), bgTimeout),
-              ),
+              new Promise<{ kind: "timeout" }>((resolve) => {
+                timeoutHandle = setTimeout(() => resolve({ kind: "timeout" }), bgTimeout);
+              }),
             ]);
+            if (timeoutHandle) clearTimeout(timeoutHandle);
             if (result.kind === "result") {
               log.info(
                 `[voice-call] Timeout path: consult finished before timeout for call=${callId}`,
@@ -492,7 +498,7 @@ export async function createVoiceCallRuntime(params: {
             consultPromise
               .then((r: { text: string }) => {
                 log.info(
-                  `[voice-call] Timeout path: background consult resolved for call=${callId}, result="${r.text.slice(0, 120)}"`,
+                  `[voice-call] Timeout path: background consult resolved for call=${callId}`,
                 );
                 spawnEmailDeliveryAgent({
                   cfg,
@@ -506,6 +512,7 @@ export async function createVoiceCallRuntime(params: {
                   recipientEmail: effectiveConfig.realtime.recipientEmail,
                   provider: agentProvider,
                   model,
+                  toolsAllow: EMAIL_DELIVERY_TOOLS_ALLOW,
                 });
               })
               .catch((err: unknown) => {
